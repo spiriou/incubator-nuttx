@@ -53,6 +53,26 @@ config PSEUDOFS_SOFTLINKS
 		to link a directory in the pseudo-file system, such as /bin, to
 		to a directory in a mounted volume, say /mnt/sdcard/bin.
 
+config EVENT_FD
+	bool "EventFD"
+	default n
+	---help---
+		Create a file descriptor for event notification
+
+config EVENT_FD_POLL
+	bool "EventFD poll support"
+	depends on EVENT_FD
+	default y
+	---help---
+		Poll support for file descriptor based events
+
+config EVENT_FD_NPOLLWAITERS
+	int "Number of eventFD poll waiters"
+	depends on EVENT_FD
+	default 2
+	---help---
+		Maximum number of threads that can be waiting on poll()
+
 source fs/aio/Kconfig
 source fs/semaphore/Kconfig
 source fs/mqueue/Kconfig
