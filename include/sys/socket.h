@@ -408,6 +408,8 @@ int getpeername(int sockfd, FAR struct sockaddr *addr,
 ssize_t recvmsg(int sockfd, FAR struct msghdr *msg, int flags);
 ssize_t sendmsg(int sockfd, FAR struct msghdr *msg, int flags);
 
+int socketpair(int domain, int type, int protocol, int sv[2]);
+
 #undef EXTERN
 #if defined(__cplusplus)
 }

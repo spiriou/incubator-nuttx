@@ -74,4 +74,11 @@ config NET_CMSG
 		as ancillary data object information). Includes additional 
 		information on the packet received or to be transmitted.
 
+config NET_SOCKETPAIR
+	bool "Socketpair support"
+	default n
+	---help---
+		socketpair - create a pair of connected sockets
+
+
 endmenu # Socket Support
