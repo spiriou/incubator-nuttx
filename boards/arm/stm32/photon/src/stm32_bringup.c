@@ -52,6 +52,10 @@
 #include "photon.h"
 #include "stm32_wdg.h"
 
+#ifdef CONFIG_USBADB
+#  include <nuttx/usb/adb.h>
+#endif
+
 /****************************************************************************
  * Public Functions
  ****************************************************************************/
@@ -151,6 +155,22 @@ int stm32_bringup(void)
       syslog(LOG_ERR, "Failed to initialize wlan: %d\n", ret);
       return ret;
     }
+#endif
+
+#if defined(CONFIG_CDCACM) && !defined(CONFIG_CDCACM_CONSOLE)
+  /* Initialize CDCACM */
+
+  syslog(LOG_INFO, "Initialize CDCACM device\n");
+
+  ret = cdcacm_initialize(0, NULL);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: cdcacm_initialize failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_USBADB
+  usbdev_adb_initialize();
 #endif
 
   return ret;
