@@ -568,34 +568,6 @@ config CDCACM_PRODUCTSTR
 endif # !CDCACM_COMPOSITE
 endif # CDCACM
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 menuconfig USBADB
 	bool "USB Android Debug Bridge (ADB) support"
 	default n
@@ -696,41 +668,19 @@ config USBADB_BULKIN_REQLEN
 		than CDCACM_TXBUFSIZE-1, since a request larger than the TX
 		buffer can never be sent.
 
-config USBADB_RXBUFSIZE
-	int "Receive buffer size"
-	default 513 if USBDEV_DUALSPEED
-	default 257 if !USBDEV_DUALSPEED
-	---help---
-		Size of the serial receive buffers.  The actual amount of data that
-		can be held in the buffer is this number minus one due to the way
-		that the circular buffer is managed.  So an RX buffer size of 257
-		will hold four full-speed, 64 byte packets; a buffer size of 513
-		will hold one high-speed, 512 byte packet.
-
-config USBADB_TXBUFSIZE
-	int "Transmit buffer size"
-	default 769 if USBDEV_DUALSPEED
-	default 193 if !USBDEV_DUALSPEED
-	---help---
-		Size of the serial transmit buffers.  The actual amount of data that
-		can be held in the buffer is this number minus one due to the way
-		that the circular buffer is managed.  So a TX buffer size of 769
-		will hold one request of size 768; a buffer size of 193 will hold
-		two requests of size 96 bytes.
-
 if !USBADB_COMPOSITE
 
 config USBADB_VENDORID
 	hex "Vendor ID"
-	default 0x05c6
+	default 0x18d1
 	---help---
-		The vendor ID code/string.
+		The vendor ID code/string. Default is Google Inc.
 
 config USBADB_PRODUCTID
 	hex "Product ID"
-	default 0x901d
+	default 0x4e11
 	---help---
-		The product ID code/string.
+		The product ID code/string. Default is Nexus One.
 
 config USBADB_VENDORSTR
 	string "Vendor string"
@@ -755,28 +705,6 @@ config USBADB_INTERFACESTR
 	default "ADB Interface"
 
 endif # USBADB
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 menuconfig USBMSC
 	bool "USB Mass storage class device"
