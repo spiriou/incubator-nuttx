@@ -653,21 +653,6 @@ config USBADB_NWRREQS
 	---help---
 		The number of write/read requests that can be in flight
 
-config USBADB_BULKIN_REQLEN
-	int "Size of one write request buffer"
-	default 768 if USBDEV_DUALSPEED
-	default 96  if !USBDEV_DUALSPEED
-	---help---
-		Ideally, the BULKOUT request size should *not* be the same size as
-		the maxpacket size.  That is because IN transfers of exactly the
-		maxpacket size will be followed by a NULL packet.  The BULKOUT,
-		on the other hand, request buffer size is always the same as the
-		maxpacket size.
-
-		There is also no reason from CDCACM_BULKIN_REQLEN to be greater
-		than CDCACM_TXBUFSIZE-1, since a request larger than the TX
-		buffer can never be sent.
-
 if !USBADB_COMPOSITE
 
 config USBADB_VENDORID

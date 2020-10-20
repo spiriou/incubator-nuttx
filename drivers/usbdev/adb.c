@@ -702,7 +702,14 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
       usbtrace(TRACE_CLASSRDCOMPLETE, priv->nrdq);
 
       rdcontainer->offset = 0;
-      sq_addlast(&rdcontainer->node, &priv->rxpending);
+      if (req->xfrd <= 0) {
+        _err("EMPTY PKT %d\n", req->xfrd);
+        /* Restart request */
+        usb_adb_submit_rdreq(priv, rdcontainer);
+      }
+      else {
+        sq_addlast(&rdcontainer->node, &priv->rxpending);
+      }
 #if 0
       _err("CHECK0 %p %p\n", rdcontainer, sq_peek(&priv->rxpending));
       /* CHECK QUEUE */
@@ -1131,11 +1138,6 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
 #else
   reqlen = CONFIG_USBADB_EPBULKIN_FSSIZE;
 #endif
-
-  // if (CONFIG_USBADB_BULKIN_REQLEN > reqlen)
-  //   {
-  //     reqlen = CONFIG_USBADB_BULKIN_REQLEN;
-  //   }
 
   for (i = 0; i < CONFIG_USBADB_NWRREQS; i++)
     {
@@ -1668,7 +1670,7 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
   ssize_t ret;
   size_t retlen;
 
-  _err("entry len=%d\n", len);
+  _err("entry len=%d %d\n", len, sq_count(&priv->rxpending));
 
   if (len <= 0 || buffer == NULL)
     {
@@ -1773,7 +1775,6 @@ static ssize_t adb_char_write(FAR struct file *filep,
 {
   int ret;
   int wlen;
-  uint16_t reqlen;
   FAR struct usbdev_req_s *req;
   FAR struct usbadb_wrreq_s *wrcontainer;
   FAR struct inode *inode = filep->f_inode;
@@ -1822,15 +1823,6 @@ static ssize_t adb_char_write(FAR struct file *filep,
 
   /* Device ready for write */
 
-  // if (CONFIG_USBADB_BULKIN_REQLEN > priv->epbulkin->maxpacket)
-  //   {
-      reqlen = priv->epbulkin->maxpacket;
-  //   }
-  // else
-  //   {
-  //     reqlen = CONFIG_USBADB_BULKIN_REQLEN;
-  //   }
-
   wlen = 0;
 
   while (len > 0 && !sq_empty(&priv->txfree))
@@ -1847,9 +1839,9 @@ static ssize_t adb_char_write(FAR struct file *filep,
 
       /* Fill the request with data */
 
-      if (len > reqlen)
+      if (len > priv->epbulkin->maxpacket)
         {
-          cur_len = reqlen;
+          cur_len = priv->epbulkin->maxpacket;
           req->flags = 0;
         }
       else
