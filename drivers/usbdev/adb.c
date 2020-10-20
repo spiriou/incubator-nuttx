@@ -32,6 +32,7 @@
 // #include <stdlib.h>
 // #include <unistd.h>
 // #include <string.h>
+#include <queue.h>
 #include <errno.h>
 #include <debug.h>
 
@@ -137,15 +138,15 @@ typedef struct adb_char_waiter_sem_s
 
 struct usbadb_wrreq_s
 {
-  FAR struct usbadb_wrreq_s *flink;    /* Implements a singly linked list */
-  FAR struct usbdev_req_s *req;        /* The contained request */
+  FAR sq_entry_t node;          /* Implements a singly linked list */
+  FAR struct usbdev_req_s *req; /* The contained request */
 };
 
 struct usbadb_rdreq_s
 {
-  FAR struct usbadb_rdreq_s *flink;    /* Implements a singly linked list */
-  FAR struct usbdev_req_s *req;        /* The contained request */
-  uint16_t offset;                     /* Offset to valid data in the RX request */
+  FAR sq_entry_t node;          /* Implements a singly linked list */
+  FAR struct usbdev_req_s *req; /* The contained request */
+  uint16_t offset;              /* Offset to valid data in the RX request */
 };
 
 /* This structure describes the internal state of the driver */
@@ -165,7 +166,7 @@ struct usbdev_adb_s
 
   uint8_t config;                     /* USB Configuration number */
 
-  // struct sq_queue_s txfree;           /* Available write request containers */
+  struct sq_queue_s txfree;           /* Available write request containers */
   struct sq_queue_s rxpending;        /* Pending read request containers */
 
   /* Pre-allocated write request containers.  The write requests will
@@ -173,7 +174,7 @@ struct usbdev_adb_s
    * EPBULKIN; Read requests will be queued in the EBULKOUT.
    */
 
-  // struct usbadb_wrreq_s wrreqs[CONFIG_USBADB_NWRREQS];
+  struct usbadb_wrreq_s wrreqs[CONFIG_USBADB_NWRREQS];
   struct usbadb_rdreq_s rdreqs[CONFIG_USBADB_NRDREQS];
 
   /* Char device driver */
@@ -522,6 +523,8 @@ static int usb_adb_submit_rdreq(FAR struct usbdev_adb_s *priv,
   FAR struct usbdev_ep_s *ep;
   int ret;
 
+  // _err("entry %p\n", rdcontainer);
+
   DEBUGASSERT(priv != NULL && rdcontainer != NULL);
   rdcontainer->offset = 0;
 
@@ -567,6 +570,90 @@ static int usb_adb_submit_rdreq(FAR struct usbdev_adb_s *priv,
 #endif
 }
 
+/****************************************************************************
+ * Name: usb_adb_wrcomplete
+ *
+ * Description:
+ *   Handle completion of write request.  This function probably executes
+ *   in the context of an interrupt handler.
+ *
+ ****************************************************************************/
+
+static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
+                               FAR struct usbdev_req_s *req)
+{
+  FAR struct usbadb_wrreq_s *wrcontainer;
+  FAR struct usbdev_adb_s *priv;
+  irqstate_t flags;
+
+  // _err("entry %d\n", req->result);
+
+  /* Sanity check */
+
+#ifdef CONFIG_DEBUG_FEATURES
+  if (!ep || !ep->priv || !req || !req->priv)
+    {
+      usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_INVALIDARG), 0);
+      return;
+    }
+#endif
+
+  /* Extract references to private data */
+
+  priv        = (FAR struct usbdev_adb_s *)ep->priv;
+  wrcontainer = (FAR struct usbadb_wrreq_s*)req->priv;
+
+  /* Return the write request to the free list */
+
+  // _err("BEFORE %d\n", sq_count(&priv->txfree));
+
+  flags = enter_critical_section();
+  sq_addlast(&wrcontainer->node, &priv->txfree);
+  leave_critical_section(flags);
+
+  // _err("DONE %d\n", sq_count(&priv->txfree));
+  /* Check for termination condition */
+
+  switch (req->result)
+    {
+    case OK: /* Normal completion */
+      {
+        usbtrace(TRACE_CLASSWRCOMPLETE, priv->nwrq);
+
+        /* Notify all waiting writers that write req is available */
+#warning RACE CONDITION
+        adb_char_waiter_sem_t *cur_sem = priv->wrsems;
+        while (cur_sem != NULL)
+          {
+            nxsem_post(&cur_sem->sem);
+            cur_sem = cur_sem->next;
+          }
+
+        priv->wrsems = NULL;
+
+#ifdef CONFIG_EVENT_FD_POLL
+        /* Notify all poll/select waiters */
+
+        adb_char_pollnotify(priv, POLLOUT);
+#endif
+      }
+      break;
+
+    case -ESHUTDOWN: /* Disconnection */
+      {
+        usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_WRSHUTDOWN), priv->nwrq);
+      }
+      break;
+
+    default: /* Some other error occurred */
+      {
+        usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_WRUNEXPECTED),
+                 (uint16_t)-req->result);
+      }
+      break;
+    }
+}
+
 
 /****************************************************************************
  * Name: usb_adb_rdcomplete
@@ -595,13 +682,14 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
 
   /* Extract references to private data */
 
-  priv = (FAR struct usbdev_adb_s *)ep->priv;
-  rdcontainer = container_of(req, struct usbadb_rdreq_s, req);
+  priv        = (FAR struct usbdev_adb_s *)ep->priv;
+  rdcontainer = (FAR struct usbadb_rdreq_s*)req->priv;
 
   /* Process the received data unless this is some unusual condition */
 
-  _err("GOT USB FRAME %d %d\n", req->result, req->xfrd);
-  DumpHex(req->buf, req->xfrd); // req->len);
+  _err("GOT USB FRAME %d %d\n",
+    req->result, req->xfrd);
+  // DumpHex(rdcontainer->req->buf, rdcontainer->req->xfrd); // req->len);
 
   flags = enter_critical_section();
   // priv->rdreq_submitted = false;
@@ -614,7 +702,20 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
       usbtrace(TRACE_CLASSRDCOMPLETE, priv->nrdq);
 
       rdcontainer->offset = 0;
-      sq_addlast((FAR sq_entry_t *)rdcontainer, &priv->rxpending);
+      sq_addlast(&rdcontainer->node, &priv->rxpending);
+#if 0
+      _err("CHECK0 %p %p\n", rdcontainer, sq_peek(&priv->rxpending));
+      /* CHECK QUEUE */
+      rdcontainer2 = container_of(
+        sq_peek(&priv->rxpending),
+        struct usbadb_rdreq_s,
+        node);
+
+      _err("CHECK1 %d %d\n",
+        rdcontainer2->req->xfrd,
+        rdcontainer2->offset);
+      _err("CHECK2 %p %p\n", rdcontainer, rdcontainer2);
+#endif
       adb_char_notify_readers(priv);
       break;
 
@@ -796,7 +897,7 @@ errout:
 static void usbclass_ep0incomplete(FAR struct usbdev_ep_s *ep,
                                  FAR struct usbdev_req_s *req)
 {
-  _err("entry\n");
+  // _err("entry\n");
 }
 
 #ifdef CONFIG_USBDEV_DUALSPEED
@@ -934,11 +1035,12 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
   int ret;
   int i;
   uint16_t reqlen;
+  irqstate_t flags;
   FAR struct usbdev_adb_s *priv = &((FAR struct adb_driver_s *)driver)->dev;
 
   usbtrace(TRACE_CLASSBIND, 0);
 
-  _err("CHECK ADDR %p %p\n", dev, driver);
+  // _err("CHECK ADDR %p %p\n", dev, driver);
 
   priv->ctrlreq = usbclass_allocreq(dev->ep0, USBADB_MXDESCLEN);
   if (priv->ctrlreq == NULL)
@@ -996,7 +1098,7 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
 
   priv->epbulkout->priv = priv;
 
-  /* Pre-allocate read requests.  The buffer size is one full packet. */
+  /* Pre-allocate read requests. The buffer size is one full packet. */
 
 #ifdef CONFIG_USBDEV_DUALSPEED
   reqlen = CONFIG_USBADB_EPBULKOUT_HSSIZE;
@@ -1018,9 +1120,45 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
         }
 
       rdcontainer->offset        = 0;
-      // rdcontainer->req->priv     = rdcontainer;
+      rdcontainer->req->priv     = rdcontainer;
       rdcontainer->req->callback = usb_adb_rdcomplete;
     }
+
+  /* Pre-allocate write requests. The buffer size is one full packet. */
+
+#ifdef CONFIG_USBDEV_DUALSPEED
+  reqlen = CONFIG_USBADB_EPBULKIN_HSSIZE;
+#else
+  reqlen = CONFIG_USBADB_EPBULKIN_FSSIZE;
+#endif
+
+  // if (CONFIG_USBADB_BULKIN_REQLEN > reqlen)
+  //   {
+  //     reqlen = CONFIG_USBADB_BULKIN_REQLEN;
+  //   }
+
+  for (i = 0; i < CONFIG_USBADB_NWRREQS; i++)
+    {
+      FAR struct usbadb_wrreq_s *wrcontainer;
+
+      wrcontainer      = &priv->wrreqs[i];
+      wrcontainer->req = usbclass_allocreq(priv->epbulkin, reqlen);
+      if (wrcontainer->req == NULL)
+        {
+          usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_WRALLOCREQ), -ENOMEM);
+          ret = -ENOMEM;
+          goto errout;
+        }
+
+      wrcontainer->req->priv     = wrcontainer;
+      wrcontainer->req->callback = usb_adb_wrcomplete;
+
+      flags = enter_critical_section();
+      sq_addlast(&wrcontainer->node, &priv->txfree);
+      leave_critical_section(flags);
+    }
+
+  _err("QUEUE INIT %d\n", sq_count(&priv->txfree));
 
   /* Report if we are selfpowered (unless we are part of a
    * composite device)
@@ -1339,6 +1477,7 @@ static int usbclass_classobject(int minor,
   alloc->drvr.ops   = &g_adb_driverops;
 
   sq_init(&alloc->dev.rxpending);
+  sq_init(&alloc->dev.txfree);
 
 #ifdef CONFIG_USBADB_COMPOSITE
   /* Save the caller provided device description (composite only) */
@@ -1350,7 +1489,7 @@ static int usbclass_classobject(int minor,
   /* Initialize the char device structure */
 
   #warning TODO char dev init
-  nxsem_init(&alloc->dev.exclsem, 0, 0);
+  nxsem_init(&alloc->dev.exclsem, 0, 1);
 
   /* Register char device driver */
 
@@ -1392,7 +1531,7 @@ static void usbclass_uninitialize(FAR struct usbdevclass_driver_s *classdev)
 
 static void adb_char_notify_readers(FAR struct usbdev_adb_s *priv)
 {
-  _err("entry\n");
+  // _err("entry\n");
 
   #warning TODO interupt lock protect priv->rdsems
 
@@ -1576,17 +1715,22 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
 
   retlen = 0;
 
-  while (!sq_empty(&priv->rxpending))
+  while (!sq_empty(&priv->rxpending) && len > 0)
     {
       FAR struct usbadb_rdreq_s *rdcontainer;
       uint16_t reqlen;
 
       /* Process each packet in the priv->rxpending list */
 
-      rdcontainer = (FAR struct usbadb_rdreq_s *)
-        sq_peek(&priv->rxpending);
+      rdcontainer = container_of(
+        sq_peek(&priv->rxpending),
+        struct usbadb_rdreq_s,
+        node);
 
       reqlen = rdcontainer->req->xfrd - rdcontainer->offset;
+
+      _err("TRY %d %d %d\n", reqlen, rdcontainer->req->xfrd, rdcontainer->offset);
+      // DumpHex(&rdcontainer->req->buf[rdcontainer->offset], reqlen);
 
       if (reqlen > len)
         {
@@ -1602,8 +1746,9 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
 
       memcpy(&buffer[retlen],
              &rdcontainer->req->buf[rdcontainer->offset],
-             rdcontainer->req->xfrd);
-      retlen += rdcontainer->req->xfrd;
+             reqlen);
+      retlen += reqlen;
+      len -= reqlen;
 
 
       /* The entire packet was processed and may be removed from the
@@ -1626,8 +1771,127 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
 static ssize_t adb_char_write(FAR struct file *filep,
                                 FAR const char *buffer, size_t len)
 {
-  _err("entry\n");
-  return -EINVAL;
+  int ret;
+  int wlen;
+  uint16_t reqlen;
+  FAR struct usbdev_req_s *req;
+  FAR struct usbadb_wrreq_s *wrcontainer;
+  FAR struct inode *inode = filep->f_inode;
+  FAR struct usbdev_adb_s *priv = inode->i_private;
+
+  irqstate_t flags;
+
+  // _err("entry len=%d\n", len);
+
+  ret = nxsem_wait(&priv->exclsem);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  // _err("GO %d\n", sq_count(&priv->txfree));
+
+  /* Check for available write request */
+
+  if (sq_empty(&priv->txfree))
+    {
+      if (filep->f_oflags & O_NONBLOCK)
+        {
+          ret = -EAGAIN;
+          goto errout;
+        }
+
+      adb_char_waiter_sem_t sem;
+      nxsem_init(&sem.sem, 0, 0);
+      nxsem_set_protocol(&sem.sem, SEM_PRIO_NONE);
+
+      // do
+        {
+          #warning INTERRUPT LOCK RACE CONDITION
+          ret = adb_char_blocking_io(priv, &sem, &priv->wrsems);
+          if (ret < 0)
+            {
+              nxsem_destroy(&sem.sem);
+              return ret;
+            }
+        }
+      // while (sq_empty(&priv->txfree));
+
+      nxsem_destroy(&sem.sem);
+    }
+
+  /* Device ready for write */
+
+  // if (CONFIG_USBADB_BULKIN_REQLEN > priv->epbulkin->maxpacket)
+  //   {
+      reqlen = priv->epbulkin->maxpacket;
+  //   }
+  // else
+  //   {
+  //     reqlen = CONFIG_USBADB_BULKIN_REQLEN;
+  //   }
+
+  wlen = 0;
+
+  while (len > 0 && !sq_empty(&priv->txfree))
+    {
+      int cur_len;
+
+      /* Get available TX request slot */
+
+      wrcontainer = container_of(
+        sq_remfirst(&priv->txfree),
+        struct usbadb_wrreq_s,
+        node);
+      req         = wrcontainer->req;
+
+      /* Fill the request with data */
+
+      if (len > reqlen)
+        {
+          cur_len = reqlen;
+          req->flags = 0;
+        }
+      else
+        {
+          cur_len = len;
+          req->flags = USBDEV_REQFLAGS_NULLPKT;
+        }
+
+      memcpy(req->buf, &buffer[wlen], cur_len);
+
+      /* Then submit the request to the endpoint */
+
+      // _err("start write %p %d %d\n", wrcontainer, cur_len, sq_count(&priv->txfree));
+
+      // FIXME IRQ LOCK ??
+      flags = enter_critical_section();
+
+      req->len     = cur_len;
+      req->priv    = wrcontainer;
+      // req->flags   = USBDEV_REQFLAGS_NULLPKT;
+      ret          = EP_SUBMIT(priv->epbulkin, req);
+
+      leave_critical_section(flags);
+
+      if (ret != OK)
+        {
+          // TODO add tx request back in txfree queue
+          usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_SUBMITFAIL),
+                   (uint16_t)-ret);
+          break;
+        }
+
+      wlen += cur_len;
+      len -= cur_len;
+    }
+
+  assert(wlen > 0);
+  ret = wlen;
+
+errout:
+  nxsem_post(&priv->exclsem);
+  return ret;
 }
 
 static int adb_char_ioctl(FAR struct file *filep, int cmd,
@@ -1646,7 +1910,7 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
   int i;
   pollevent_t eventset;
 
-  _err("entry setup=%d\n", setup);
+  // _err("entry setup=%d\n", setup);
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -1700,20 +1964,17 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
 
   eventset = 0;
 
-  #warning TODO poll notify
-#if 0
-  if (priv->counter < (eventfd_t)-1)
+  if (!sq_empty(&priv->txfree))
     {
       eventset |= POLLOUT;
     }
 
   /* Notify the POLLIN event if the pipe is not empty */
 
-  if (priv->counter > 0)
+  if (!sq_empty(&priv->rxpending))
     {
       eventset |= POLLIN;
     }
-#endif
 
   if (eventset)
     {
