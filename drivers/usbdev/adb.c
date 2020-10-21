@@ -23,15 +23,7 @@
  ****************************************************************************/
 
 #include <nuttx/config.h>
-
-#include <nuttx/nuttx.h> // container_of
-// #include <sys/types.h>
-// #include <stdint.h>
-// #include <stdbool.h>
-// #include <stdio.h>
-// #include <stdlib.h>
-// #include <unistd.h>
-// #include <string.h>
+#include <nuttx/nuttx.h>
 #include <queue.h>
 #include <errno.h>
 #include <debug.h>
@@ -131,7 +123,7 @@
 typedef struct adb_char_waiter_sem_s
 {
   sem_t sem;
-  struct adb_char_waiter_sem_s *next;
+  FAR struct adb_char_waiter_sem_s *next;
 } adb_char_waiter_sem_t;
 
 /* Container to support a list of requests */
@@ -343,50 +335,6 @@ static const struct adb_cfgdesc_s g_adb_cfgdesc =
     .protocol       = 0x01,
     .iif            = USBADB_INTERFACESTRID     /* ADB Interface */
   }
-#if 0
-  ,{
-    .len          = USB_SIZEOF_EPDESC,
-    .type         = USB_DESC_TYPE_ENDPOINT,
-    .addr         = USB_EPIN(CONFIG_USBADB_EPBULKIN),
-    .attr         = USB_EP_ATTR_XFER_BULK | /* Endpoint attributes */
-                    USB_EP_ATTR_NO_SYNC |
-                    USB_EP_ATTR_USAGE_DATA,
-#ifdef CONFIG_USBDEV_DUALSPEED
-    .mxpacketsize =
-    {
-      LSBYTE(512), MSBYTE(512)
-    },
-    .interval     = 0
-#else
-    .mxpacketsize =
-    {
-      LSBYTE(64), MSBYTE(64)
-    },
-    .interval     = 1
-#endif
-  },
-  {
-    .len          = USB_SIZEOF_EPDESC,
-    .type         = USB_DESC_TYPE_ENDPOINT,
-    .addr         = USB_EPOUT(CONFIG_USBADB_EPBULKOUT),
-    .attr         = USB_EP_ATTR_XFER_BULK | /* Endpoint attributes */
-                    USB_EP_ATTR_NO_SYNC |
-                    USB_EP_ATTR_USAGE_DATA,
-#ifdef CONFIG_USBDEV_DUALSPEED
-    .mxpacketsize =
-    {
-      LSBYTE(512), MSBYTE(512)
-    },
-    .interval     = 0
-#else
-    .mxpacketsize =
-    {
-      LSBYTE(64), MSBYTE(64)
-    },
-    .interval     = 1
-#endif
-  }
-#endif
 };
 
 /****************************************************************************
@@ -496,11 +444,6 @@ static int usbclass_copy_epdesc(int epid, FAR struct usb_epdesc_s *epdesc,
   return sizeof(struct usb_epdesc_s);
 }
 
-
-
-
-
-
 /****************************************************************************
  * Name: usb_adb_submit_rdreq
  *
@@ -526,7 +469,6 @@ static int usb_adb_submit_rdreq(FAR struct usbdev_adb_s *priv,
   // _err("entry %p\n", rdcontainer);
 
   DEBUGASSERT(priv != NULL && rdcontainer != NULL);
-  rdcontainer->offset = 0;
 
   req      = rdcontainer->req;
   DEBUGASSERT(req != NULL);
@@ -543,31 +485,6 @@ static int usb_adb_submit_rdreq(FAR struct usbdev_adb_s *priv,
     }
 
   return ret;
-
-
-#if 0
-
-  // irqstate_t flags = enter_critical_section();
-  int ret = OK;
-
-  // if (!priv->rdreq_submitted && !priv->rx_blocked)
-  //   {
-      priv->rdreq->len = priv->epbulkout->maxpacket;
-      ret = EP_SUBMIT(priv->epbulkout, priv->rdreq);
-      if (ret != OK)
-        {
-          usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_RDSUBMIT),
-                   (uint16_t)-priv->rdreq->result);
-        }
-      // else
-      //   {
-      //     priv->rdreq_submitted = true;
-      //   }
-    // }
-
-  // leave_critical_section(flags);
-  return ret;
-#endif
 }
 
 /****************************************************************************
@@ -609,9 +526,7 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
 
   flags = enter_critical_section();
   sq_addlast(&wrcontainer->node, &priv->txfree);
-  leave_critical_section(flags);
 
-  // _err("DONE %d\n", sq_count(&priv->txfree));
   /* Check for termination condition */
 
   switch (req->result)
@@ -621,7 +536,7 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
         usbtrace(TRACE_CLASSWRCOMPLETE, priv->nwrq);
 
         /* Notify all waiting writers that write req is available */
-#warning RACE CONDITION
+
         adb_char_waiter_sem_t *cur_sem = priv->wrsems;
         while (cur_sem != NULL)
           {
@@ -631,11 +546,9 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
 
         priv->wrsems = NULL;
 
-#ifdef CONFIG_EVENT_FD_POLL
         /* Notify all poll/select waiters */
 
         adb_char_pollnotify(priv, POLLOUT);
-#endif
       }
       break;
 
@@ -652,8 +565,9 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
       }
       break;
     }
-}
 
+  leave_critical_section(flags);
+}
 
 /****************************************************************************
  * Name: usb_adb_rdcomplete
@@ -687,12 +601,9 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
 
   /* Process the received data unless this is some unusual condition */
 
-  _err("GOT USB FRAME %d %d\n",
-    req->result, req->xfrd);
+  // _err("GOT USB FRAME %d %d\n",
+  //   req->result, req->xfrd);
   // DumpHex(rdcontainer->req->buf, rdcontainer->req->xfrd); // req->len);
-
-  flags = enter_critical_section();
-  // priv->rdreq_submitted = false;
 
   switch (req->result)
     {
@@ -701,29 +612,24 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
 
       usbtrace(TRACE_CLASSRDCOMPLETE, priv->nrdq);
 
-      rdcontainer->offset = 0;
+      flags = enter_critical_section();
+
       if (req->xfrd <= 0) {
         _err("EMPTY PKT %d\n", req->xfrd);
         /* Restart request */
         usb_adb_submit_rdreq(priv, rdcontainer);
       }
       else {
-        sq_addlast(&rdcontainer->node, &priv->rxpending);
-      }
-#if 0
-      _err("CHECK0 %p %p\n", rdcontainer, sq_peek(&priv->rxpending));
-      /* CHECK QUEUE */
-      rdcontainer2 = container_of(
-        sq_peek(&priv->rxpending),
-        struct usbadb_rdreq_s,
-        node);
+        /* Set request on RX pending queue */
 
-      _err("CHECK1 %d %d\n",
-        rdcontainer2->req->xfrd,
-        rdcontainer2->offset);
-      _err("CHECK2 %p %p\n", rdcontainer, rdcontainer2);
-#endif
+        rdcontainer->offset = 0;
+        sq_addlast(&rdcontainer->node, &priv->rxpending);
+        
+      }
+
       adb_char_notify_readers(priv);
+
+      leave_critical_section(flags);
       break;
 
     case -ESHUTDOWN: /* Disconnection */
@@ -737,17 +643,7 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
       usb_adb_submit_rdreq(priv, rdcontainer);
       break;
     };
-
-  leave_critical_section(flags);
 }
-
-
-
-
-
-
-
-
 
 /****************************************************************************
  * Name: usbclass_resetconfig
@@ -1531,11 +1427,18 @@ static void usbclass_uninitialize(FAR struct usbdevclass_driver_s *classdev)
  * Char Device Driver Methods
  ****************************************************************************/
 
+/****************************************************************************
+ * Name: adb_char_notify_readers
+ *
+ * Description:
+ *   Notify threads waiting to read device. This function must be called
+ *   with interrupt disabled.
+ *
+ ****************************************************************************/
+
 static void adb_char_notify_readers(FAR struct usbdev_adb_s *priv)
 {
   // _err("entry\n");
-
-  #warning TODO interupt lock protect priv->rdsems
 
   /* Notify all of the waiting readers */
 
@@ -1552,6 +1455,15 @@ static void adb_char_notify_readers(FAR struct usbdev_adb_s *priv)
 
   adb_char_pollnotify(priv, POLLIN);
 }
+
+/****************************************************************************
+ * Name: adb_char_pollnotify
+ *
+ * Description:
+ *   Notify threads waiting for device event. This function must be called
+ *   with interrupt disabled.
+ *
+ ****************************************************************************/
 
 static void adb_char_pollnotify(FAR struct usbdev_adb_s *dev,
                                 pollevent_t eventset)
@@ -1573,6 +1485,14 @@ static void adb_char_pollnotify(FAR struct usbdev_adb_s *dev,
         }
     }
 }
+
+/****************************************************************************
+ * Name: adb_char_open
+ *
+ * Description:
+ *   Open adb device. Only one open() instance is supported.
+ *
+ ****************************************************************************/
 
 static int adb_char_open(FAR struct file *filep)
 {
@@ -1617,15 +1537,31 @@ static int adb_char_close(FAR struct file *filep)
 
 static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
                                 FAR adb_char_waiter_sem_t *sem,
-                                FAR adb_char_waiter_sem_t **slist)
+                                FAR adb_char_waiter_sem_t **slist,
+                                FAR struct sq_queue_s *queue)
 {
   int ret;
+  irqstate_t flags;
+
+  flags = enter_critical_section();
+
+  if (!sq_empty(queue))
+    {
+      /* Queue not empty after all */
+      leave_critical_section(flags);
+      return 0;
+    }
+
+  /* Register waiter semaphore */
+
   sem->next = *slist;
   *slist = sem;
 
+  leave_critical_section(flags);
+
   nxsem_post(&priv->exclsem);
 
-  /* Wait for eventfd to notify */
+  /* Wait for USB device to notify */
 
   ret = nxsem_wait(&sem->sem);
 
@@ -1636,6 +1572,8 @@ static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
        */
 
       nxsem_wait_uninterruptible(&priv->exclsem);
+
+      flags = enter_critical_section();
 
       adb_char_waiter_sem_t *cur_sem = *slist;
 
@@ -1655,6 +1593,7 @@ static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
             }
         }
 
+      leave_critical_section(flags);
       nxsem_post(&priv->exclsem);
       return ret;
     }
@@ -1669,13 +1608,11 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
   FAR struct usbdev_adb_s *priv = inode->i_private;
   ssize_t ret;
   size_t retlen;
+  irqstate_t flags;
 
-  _err("entry len=%d %d\n", len, sq_count(&priv->rxpending));
+  // _err("entry len=%d %d\n", len, sq_count(&priv->rxpending));
 
-  if (len <= 0 || buffer == NULL)
-    {
-      return -EINVAL;
-    }
+  assert(len > 0 && buffer != NULL);
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -1685,7 +1622,6 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
 
   /* Check for available data */
 
-  // if (dev->counter == 0)
   if (sq_empty(&priv->rxpending))
     {
       if (filep->f_oflags & O_NONBLOCK)
@@ -1698,17 +1634,20 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
       nxsem_init(&sem.sem, 0, 0);
       nxsem_set_protocol(&sem.sem, SEM_PRIO_NONE);
 
-      // do
+      do
         {
-          #warning INTERRUPT LOCK RACE CONDITION
-          ret = adb_char_blocking_io(priv, &sem, &priv->rdsems);
+          /* RX queue seems empty. Check again with interrupts disabled */
+
+          ret = adb_char_blocking_io(priv, &sem, &priv->rdsems, &priv->rxpending);
           if (ret < 0)
             {
               nxsem_destroy(&sem.sem);
               return ret;
             }
         }
-      // while (dev->counter == 0);
+      while (sq_empty(&priv->rxpending));
+
+      /* RX queue not empty and exclsem locked so we are the only reader */
 
       nxsem_destroy(&sem.sem);
     }
@@ -1730,9 +1669,6 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
         node);
 
       reqlen = rdcontainer->req->xfrd - rdcontainer->offset;
-
-      _err("TRY %d %d %d\n", reqlen, rdcontainer->req->xfrd, rdcontainer->offset);
-      // DumpHex(&rdcontainer->req->buf[rdcontainer->offset], reqlen);
 
       if (reqlen > len)
         {
@@ -1757,7 +1693,11 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
        * pending RX list.
        */
 
+      // FIXME atomic queue primitives
+      flags = enter_critical_section();
       sq_remfirst(&priv->rxpending);
+      leave_critical_section(flags);
+
       ret = usb_adb_submit_rdreq(priv, rdcontainer);
       // TODO handle error
       if(ret != OK)
@@ -1790,8 +1730,6 @@ static ssize_t adb_char_write(FAR struct file *filep,
       return ret;
     }
 
-  // _err("GO %d\n", sq_count(&priv->txfree));
-
   /* Check for available write request */
 
   if (sq_empty(&priv->txfree))
@@ -1806,17 +1744,18 @@ static ssize_t adb_char_write(FAR struct file *filep,
       nxsem_init(&sem.sem, 0, 0);
       nxsem_set_protocol(&sem.sem, SEM_PRIO_NONE);
 
-      // do
+      do
         {
-          #warning INTERRUPT LOCK RACE CONDITION
-          ret = adb_char_blocking_io(priv, &sem, &priv->wrsems);
+          /* TX queue seems empty. Check again with interrupts disabled */
+
+          ret = adb_char_blocking_io(priv, &sem, &priv->wrsems, &priv->txfree);
           if (ret < 0)
             {
               nxsem_destroy(&sem.sem);
               return ret;
             }
         }
-      // while (sq_empty(&priv->txfree));
+      while (sq_empty(&priv->txfree));
 
       nxsem_destroy(&sem.sem);
     }
@@ -1831,46 +1770,43 @@ static ssize_t adb_char_write(FAR struct file *filep,
 
       /* Get available TX request slot */
 
+      flags = enter_critical_section();
+
       wrcontainer = container_of(
         sq_remfirst(&priv->txfree),
         struct usbadb_wrreq_s,
         node);
-      req         = wrcontainer->req;
+
+      leave_critical_section(flags);
+
+      req = wrcontainer->req;
 
       /* Fill the request with data */
 
       if (len > priv->epbulkin->maxpacket)
         {
           cur_len = priv->epbulkin->maxpacket;
-          req->flags = 0;
         }
       else
         {
           cur_len = len;
-          req->flags = USBDEV_REQFLAGS_NULLPKT;
         }
 
       memcpy(req->buf, &buffer[wlen], cur_len);
 
       /* Then submit the request to the endpoint */
 
-      // _err("start write %p %d %d\n", wrcontainer, cur_len, sq_count(&priv->txfree));
-
-      // FIXME IRQ LOCK ??
-      flags = enter_critical_section();
-
       req->len     = cur_len;
+      req->flags   = 0;
       req->priv    = wrcontainer;
-      // req->flags   = USBDEV_REQFLAGS_NULLPKT;
       ret          = EP_SUBMIT(priv->epbulkin, req);
-
-      leave_critical_section(flags);
 
       if (ret != OK)
         {
           // TODO add tx request back in txfree queue
           usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_SUBMITFAIL),
                    (uint16_t)-ret);
+          PANIC();
           break;
         }
 
@@ -1901,6 +1837,7 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
   int ret;
   int i;
   pollevent_t eventset;
+  irqstate_t flags;
 
   // _err("entry setup=%d\n", setup);
 
@@ -1925,6 +1862,10 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
       goto errout;
     }
 
+  // FIXME only parts of this function required interrupt disabled
+
+  flags = enter_critical_section();
+
   /* This is a request to set up the poll. Find an available
    * slot for the poll structure reference
    */
@@ -1947,7 +1888,7 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
     {
       fds->priv = NULL;
       ret       = -EBUSY;
-      goto errout;
+      goto exit_leave_critical;
     }
 
   /* Notify the POLLOUT event if the pipe is not full, but only if
@@ -1973,6 +1914,8 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
       adb_char_pollnotify(priv, eventset);
     }
 
+exit_leave_critical:
+  leave_critical_section(flags);
 errout:
   nxsem_post(&priv->exclsem);
   return ret;
