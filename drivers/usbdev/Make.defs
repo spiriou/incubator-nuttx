@@ -69,6 +69,10 @@ ifeq ($(CONFIG_USBADB),y)
   CSRCS += adb.c
 endif
 
+ifeq ($(CONFIG_USBDEV_HID),y)
+  CSRCS += usbdev_hid.c usbdev_hid_desc.c
+endif
+
 ifeq ($(CONFIG_NET_CDCECM),y)
   CSRCS += cdcecm.c
 endif

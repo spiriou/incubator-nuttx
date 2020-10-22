@@ -2327,15 +2327,8 @@ static inline void stm32_ep0out_stdrequest(struct stm32_usbdev_s *priv,
 
       {
         usbtrace(TRACE_INTDECODE(STM32_TRACEINTID_GETSETDESC), 0);
-        if ((ctrlreq->type & USB_REQ_RECIPIENT_MASK) == USB_REQ_RECIPIENT_DEVICE)
-          {
-            stm32_req_dispatch(priv, &priv->ctrlreq);
-          }
-        else
-          {
-            usbtrace(TRACE_DEVERROR(STM32_TRACEERR_BADGETSETDESC), 0);
-            priv->stalled = true;
-          }
+
+        stm32_req_dispatch(priv, &priv->ctrlreq);
       }
       break;
 
@@ -4368,6 +4361,7 @@ static int stm32_ep_submit(FAR struct usbdev_ep_s *ep, FAR struct usbdev_req_s *
 
   if (privep->stalled)
     {
+      _err("stalled\n");
       ret = -EBUSY;
     }
   else

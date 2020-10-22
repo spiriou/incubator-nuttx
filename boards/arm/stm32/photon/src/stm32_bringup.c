@@ -169,9 +169,23 @@ int stm32_bringup(void)
     }
 #endif
 
+#ifdef CONFIG_USBDEV_COMPOSITE
+  ret = board_composite_initialize(0);
+  if (ret != OK)
+    {
+      syslog(LOG_ERR, "Failed to initialize composite: %d\n", ret);
+      return ret;
+    }
+
+  if (board_composite_connect(0, 0) == NULL)
+    {
+      syslog(LOG_ERR, "Failed to connect composite: %d\n", ret);
+      return ret;
+    }
+#else
 #ifdef CONFIG_USBADB
   usbdev_adb_initialize();
 #endif
-
+#endif /* CONFIG_USBDEV_COMPOSITE */
   return ret;
 }

@@ -29,6 +29,17 @@
 #include <nuttx/usb/usbdev.h>
 
 /****************************************************************************
+ * Preprocessor definitions
+ ****************************************************************************/
+
+/* Indexes for devinfo.epno[] array. Used for composite device configuration. */
+
+#define USBADB_NUM_EPS             (2)
+
+#define USBADB_EP_BULKIN_IDX       (0)
+#define USBADB_EP_BULKOUT_IDX      (1)
+
+/****************************************************************************
  * Public Functions
  ****************************************************************************/
 

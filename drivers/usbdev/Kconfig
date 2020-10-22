@@ -691,6 +691,44 @@ config USBADB_INTERFACESTR
 
 endif # USBADB
 
+menuconfig USBDEV_HID
+	bool "USB device HID support"
+	default n
+	---help---
+		Enables USB device HID support
+
+if USBDEV_HID
+
+menuconfig USBHID_COMPOSITE
+	bool "HID composite support"
+	default n
+	depends on USBDEV_COMPOSITE
+	---help---
+		Configure the usb HID driver as part of a composite driver
+		(only if USBDEV_COMPOSITE is also defined)
+
+if !USBHID_COMPOSITE
+
+# In a composite device the EP0 config comes from the composite device
+# and the EP-Number is configured dynamically via composite_initialize
+
+config USBHID_EP0MAXPACKET
+	int "Endpoint 0 max packet size"
+	default 8
+	---help---
+		Endpoint 0 max packet size. Default 8.
+
+config USBHID_EPINTIN
+	int "Interrupt IN endpoint number"
+	default 1
+	---help---
+		The logical 7-bit address of a hardware endpoint that supports
+		interrupt IN operation.  Default 1.
+
+endif # !USBHID_COMPOSITE
+
+endif # USBDEV_HID
+
 menuconfig USBMSC
 	bool "USB Mass storage class device"
 	default n

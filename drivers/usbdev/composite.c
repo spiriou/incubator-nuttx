@@ -186,6 +186,7 @@ static int composite_classsetup(FAR struct composite_dev_s *priv,
                        priv->device[i].compdesc.devinfo.ninterfaces))
         {
           ret = CLASS_SETUP(priv->device[i].dev, dev, ctrl, dataout, outlen);
+          _err("RET %d\n", ret);
           break;
         }
     }
@@ -531,7 +532,7 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
   index     = GETUINT16(ctrl->index);
   len       = GETUINT16(ctrl->len);
 
-  uinfo("type=%02x req=%02x value=%04x index=%04x len=%04x\n",
+  _err("type=%02x req=%02x value=%04x index=%04x len=%04x\n",
         ctrl->type, ctrl->req, value, index, len);
   UNUSED(index);
 
@@ -588,6 +589,9 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
                   /* value == string index. Zero is the language ID. */
 
                   uint8_t strid = ctrl->value[0];
+
+                  _err("REQ STR %d %d\n", strid, COMPOSITE_NSTRIDS);
+
                   FAR struct usb_strdesc_s *buf =
                              (FAR struct usb_strdesc_s *)ctrlreq->buf;
 
@@ -621,16 +625,24 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
 
                       for (i = 0; i < priv->ndevices; i++)
                         {
+                          _err("check %d %d -> %d\n",
+                            strid,
+                            priv->device[i].compdesc.devinfo.strbase,
+                            priv->device[i].compdesc.devinfo.nstrings);
+
                           if (strid >  priv->device[i].compdesc.devinfo.strbase &&
                               strid <= priv->device[i].compdesc.devinfo.strbase +
                                        priv->device[i].compdesc.devinfo.nstrings)
                             {
+                              _err("FOUND\n");
                               ret = priv->device[i].compdesc.mkstrdesc(strid -
                                     priv->device[i].compdesc.devinfo.strbase, buf);
                               break;
                             }
                         }
                     }
+
+                  _err("ret str %d\n", ret);
                 }
                 break;
 
@@ -661,7 +673,7 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
                                       outlen);
                   }
 
-                dispatched = true;
+                // dispatched = true;
                 priv->config = value;
               }
           }
@@ -724,6 +736,8 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
         * requests.
         */
 
+      _err("dispatch to interface\n");
+
       ret = composite_classsetup(priv, dev, ctrl, dataout, outlen);
       dispatched = true;
     }
@@ -743,6 +757,8 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
       /* And submit the request to the USB controller driver */
 
       ret = EP_SUBMIT(dev->ep0, ctrlreq);
+
+      _err("submit %d %d\n", ret, ctrlreq->len);
       if (ret < 0)
         {
           usbtrace(TRACE_CLSERROR(USBCOMPOSITE_TRACEERR_EPRESPQ), (uint16_t)-ret);
@@ -751,6 +767,7 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
         }
     }
 
+  _err("EXIT %d\n", ret);
   return ret;
 }
 
