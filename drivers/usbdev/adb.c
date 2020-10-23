@@ -35,7 +35,6 @@
 #include <nuttx/usb/usbdev_trace.h>
 #include <nuttx/usb/adb.h>
 
-// char device
 #include <nuttx/fs/fs.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -44,15 +43,6 @@
 #  include <nuttx/usb/composite.h>
 #  include "composite.h"
 #endif
-
-#define CONFIG_USBADB_EPBULK_SIZE 64
-
-#define CONFIG_USBADB_EPBULKIN_HSSIZE 512
-#define CONFIG_USBADB_EPBULKIN_FSSIZE 64
-#define CONFIG_USBADB_EPBULKOUT_HSSIZE 512
-#define CONFIG_USBADB_EPBULKOUT_FSSIZE 64
-
-#define CONFIG_USBADB_NPOLLWAITERS 1
 
 /****************************************************************************
  * Pre-processor Definitions
@@ -98,23 +88,24 @@
 #  define USBADB_SERIALSTRID       (3)
 #  define USBADB_CONFIGSTRID       (4)
 #  define USBADB_INTERFACESTRID    (5)
-
-// #  define USBADB_STRBASE           (0)
 #else
 #  define USBADB_INTERFACESTRID    (1)
-// #  define USBADB_INTERFACESTRID    ((CONFIG_USBADB_STRBASE)+1)
-// #  define USBADB_STRBASE           (CONFIG_USBADB_STRBASE)
+#  define USBADB_NSTRIDS           (1)
 #endif
-
-// #  define USBADB_LASTBASESTRID     (USBADB_INTERFACESTRID)
 
 #define USBADB_NCONFIGS          (1)
 #define USBADB_CONFIGID          (1)
 #define USBADB_CONFIGIDNONE      (0)
 
+/* Length of ADB descriptor */
+
+#define USBADB_DESC_TOTALLEN 32
+
 /****************************************************************************
  * Private Types
  ****************************************************************************/
+
+/* Manage char device non blocking io */
 
 typedef struct adb_char_waiter_sem_s
 {
@@ -150,15 +141,14 @@ struct usbdev_adb_s
   FAR struct usbdev_ep_s  *epbulkout; /* Bulk OUT endpoint structure */
 
   FAR struct usbdev_req_s *ctrlreq;   /* Preallocated control request */
-  // FAR struct usbdev_req_s *rdreq;     /* Preallocated read request */
 
   uint8_t config;                     /* USB Configuration number */
 
   struct sq_queue_s txfree;           /* Available write request containers */
   struct sq_queue_s rxpending;        /* Pending read request containers */
 
-  /* Pre-allocated write request containers.  The write requests will
-   * be linked in a free list (txfree), and used to send requests to
+  /* Pre-allocated request containers. The write requests will be
+   * linked in a free list (txfree), and used to send requests to
    * EPBULKIN; Read requests will be queued in the EBULKOUT.
    */
 
@@ -168,8 +158,9 @@ struct usbdev_adb_s
   /* Char device driver */
 
   sem_t                 exclsem; /* Enforces device exclusive access */
-  adb_char_waiter_sem_t *rdsems;  /* List of blocking readers */
-  adb_char_waiter_sem_t *wrsems;  /* List of blocking writers */
+  adb_char_waiter_sem_t *rdsems; /* List of blocking readers */
+  adb_char_waiter_sem_t *wrsems; /* List of blocking writers */
+  uint8_t               crefs;   /* Count of opened instances */
   FAR struct pollfd *fds[CONFIG_USBADB_NPOLLWAITERS];
 };
 
@@ -185,16 +176,11 @@ struct adb_cfgdesc_s
   struct usb_cfgdesc_s cfgdesc;        /* Configuration descriptor */
 #endif
   struct usb_ifdesc_s  ifdesc;         /* ADB interface descriptor */
-  // struct usb_epdesc_s  epbulkoutdesc;  /* Bulk out interface descriptor */
-  // struct usb_epdesc_s  epbulkindesc;   /* Bulk in interface descriptor */
 };
 
 /****************************************************************************
  * Private Function Prototypes
  ****************************************************************************/
-
-static FAR struct usbdev_req_s *usbclass_allocreq(FAR struct usbdev_ep_s *ep,
-                                                  uint16_t len);
 
 /* USB class device *********************************************************/
 
@@ -208,12 +194,14 @@ static int     usbclass_setup(FAR struct usbdevclass_driver_s *driver,
                  size_t outlen);
 static void    usbclass_disconnect(FAR struct usbdevclass_driver_s *driver,
                  FAR struct usbdev_s *dev);
-#if 1 // def CONFIG_SERIAL_REMOVABLE
+
 static void    usbclass_suspend(FAR struct usbdevclass_driver_s *driver,
                  FAR struct usbdev_s *dev);
 static void    usbclass_resume(FAR struct usbdevclass_driver_s *driver,
                  FAR struct usbdev_s *dev);
-#endif
+
+static FAR struct usbdev_req_s *usbclass_allocreq(FAR struct usbdev_ep_s *ep,
+                                                  uint16_t len);
 
 /* Char device Operations ***************************************************/
 
@@ -259,12 +247,9 @@ static const struct file_operations g_adb_fops =
   0,              /* seek */
   adb_char_ioctl, /* ioctl */
   adb_char_poll   /* poll */
-
 };
 
 /* USB descriptor ***********************************************************/
-
-#define USB_ADB_DESC_TOTALLEN 32
 
 #ifndef CONFIG_USBADB_COMPOSITE
 static const struct usb_devdesc_s g_adb_devdesc =
@@ -276,11 +261,11 @@ static const struct usb_devdesc_s g_adb_devdesc =
     LSBYTE(0x0200),
     MSBYTE(0x0200)
   },
-  .classid = 0,                      /* Device class */
-  .subclass = 0,                     /* Device sub-class */
-  .protocol = 0,                     /* Device protocol */
+  .classid = 0,                               /* Device class */
+  .subclass = 0,                              /* Device sub-class */
+  .protocol = 0,                              /* Device protocol */
   .mxpacketsize = CONFIG_USBADB_EP0MAXPACKET, /* Max packet size (ep0) */
-  .vendor =                          /* Vendor ID */
+  .vendor =                                   /* Vendor ID */
   {
     LSBYTE(CONFIG_USBADB_VENDORID),
     MSBYTE(CONFIG_USBADB_VENDORID)
@@ -304,20 +289,21 @@ static const struct adb_cfgdesc_s g_adb_cfgdesc =
 {
 #ifndef CONFIG_USBADB_COMPOSITE
   {
-    .len          = USB_SIZEOF_CFGDESC, /* Descriptor length    */
+    .len          = USB_SIZEOF_CFGDESC,   /* Descriptor length    */
     .type         = USB_DESC_TYPE_CONFIG, /* Descriptor type      */
     .totallen     =
     {
-      LSBYTE(USB_ADB_DESC_TOTALLEN), /* LS Total length */
-      MSBYTE(USB_ADB_DESC_TOTALLEN)  /* MS Total length */
+      LSBYTE(USBADB_DESC_TOTALLEN),       /* LS Total length      */
+      MSBYTE(USBADB_DESC_TOTALLEN)        /* MS Total length      */
     },
-    .ninterfaces  = 1, /* Number of interfaces */
-    .cfgvalue     = 1, /* Configuration value  */
-    .icfg         = USBADB_CONFIGSTRID, /* Configuration        */
+    .ninterfaces  = 1,                    /* Number of interfaces */
+    .cfgvalue     = 1,                    /* Configuration value  */
+    .icfg         = USBADB_CONFIGSTRID,   /* Configuration        */
     .attr         = USB_CONFIG_ATTR_ONE |
-                    USBADB_SELFPOWERED |
-                    USBADB_REMOTEWAKEUP, /* Attributes           */
-    .mxpower      = (CONFIG_USBDEV_MAXPOWER + 1) / 2 /* Max power (mA/2)     */
+                    USBADB_SELFPOWERED  |
+                    USBADB_REMOTEWAKEUP,  /* Attributes           */
+
+    .mxpower      = (CONFIG_USBDEV_MAXPOWER + 1) / 2 /* Max power (mA/2) */
   },
 #endif
   {
@@ -329,12 +315,20 @@ static const struct adb_cfgdesc_s g_adb_cfgdesc =
     .classid        = USB_CLASS_VENDOR_SPEC,
     .subclass       = 0x42,
     .protocol       = 0x01,
-    .iif            = USBADB_INTERFACESTRID     /* ADB Interface */
+    .iif            = USBADB_INTERFACESTRID
   }
 };
 
 /****************************************************************************
  * Private Functions
+ ****************************************************************************/
+
+/****************************************************************************
+ * Name: usbclass_allocreq
+ *
+ * Description:
+ *   Allocate request buffer for a specified endpoint.
+ *
  ****************************************************************************/
 
 static FAR struct usbdev_req_s *usbclass_allocreq(FAR struct usbdev_ep_s *ep,
@@ -378,7 +372,7 @@ static int usbclass_copy_epdesc(int epid, FAR struct usb_epdesc_s *epdesc,
   epdesc->len  = USB_SIZEOF_EPDESC;           /* Descriptor length */
   epdesc->type = USB_DESC_TYPE_ENDPOINT;      /* Descriptor type */
   epdesc->attr = USB_EP_ATTR_XFER_BULK |      /* Endpoint attributes */
-                 USB_EP_ATTR_NO_SYNC |
+                 USB_EP_ATTR_NO_SYNC   |
                  USB_EP_ATTR_USAGE_DATA;
   epdesc->interval = 0;                       /* Interval */
 
@@ -388,7 +382,6 @@ static int usbclass_copy_epdesc(int epid, FAR struct usb_epdesc_s *epdesc,
 
 #ifdef CONFIG_USBADB_COMPOSITE
       epdesc->addr = USB_EPIN(devinfo->epno[USBADB_EP_BULKIN_IDX]);
-      _err("EPint %d 0x%x\n", USBADB_EP_BULKIN_IDX, epdesc->addr);
 #else
       epdesc->addr = USB_EPIN(CONFIG_USBADB_EPBULKIN);
 #endif
@@ -416,7 +409,6 @@ static int usbclass_copy_epdesc(int epid, FAR struct usb_epdesc_s *epdesc,
 
 #ifdef CONFIG_USBADB_COMPOSITE
       epdesc->addr = USB_EPOUT(devinfo->epno[USBADB_EP_BULKOUT_IDX]);
-      _err("EPout %d 0x%x\n", USBADB_EP_BULKOUT_IDX, epdesc->addr);
 #else
       epdesc->addr = USB_EPOUT(CONFIG_USBADB_EPBULKOUT);
 #endif
@@ -450,7 +442,7 @@ static int usbclass_copy_epdesc(int epid, FAR struct usb_epdesc_s *epdesc,
  *   when the RX packet buffer is already in use.
  *
  * Input Parameters:
- *   priv: pointer to RNDIS device driver structure
+ *   priv: pointer to ADB device driver structure
  *
  * Returned Value:
  *   The return value of the EP_SUBMIT operation
@@ -463,8 +455,6 @@ static int usb_adb_submit_rdreq(FAR struct usbdev_adb_s *priv,
   FAR struct usbdev_req_s *req;
   FAR struct usbdev_ep_s *ep;
   int ret;
-
-  // _err("entry %p\n", rdcontainer);
 
   DEBUGASSERT(priv != NULL && rdcontainer != NULL);
 
@@ -501,8 +491,6 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
   FAR struct usbdev_adb_s *priv;
   irqstate_t flags;
 
-  // _err("entry %d\n", req->result);
-
   /* Sanity check */
 
 #ifdef CONFIG_DEBUG_FEATURES
@@ -516,11 +504,9 @@ static void usb_adb_wrcomplete(FAR struct usbdev_ep_s *ep,
   /* Extract references to private data */
 
   priv        = (FAR struct usbdev_adb_s *)ep->priv;
-  wrcontainer = (FAR struct usbadb_wrreq_s*)req->priv;
+  wrcontainer = (FAR struct usbadb_wrreq_s *)req->priv;
 
   /* Return the write request to the free list */
-
-  // _err("BEFORE %d\n", sq_count(&priv->txfree));
 
   flags = enter_critical_section();
   sq_addlast(&wrcontainer->node, &priv->txfree);
@@ -595,39 +581,38 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
   /* Extract references to private data */
 
   priv        = (FAR struct usbdev_adb_s *)ep->priv;
-  rdcontainer = (FAR struct usbadb_rdreq_s*)req->priv;
+  rdcontainer = (FAR struct usbadb_rdreq_s *)req->priv;
 
   /* Process the received data unless this is some unusual condition */
-
-  // _err("GOT USB FRAME %d %d\n",
-  //   req->result, req->xfrd);
-  // DumpHex(rdcontainer->req->buf, rdcontainer->req->xfrd); // req->len);
 
   switch (req->result)
     {
     case 0: /* Normal completion */
-      /* Queue request and notify readers */
 
       usbtrace(TRACE_CLASSRDCOMPLETE, priv->nrdq);
 
-      flags = enter_critical_section();
+      if (req->xfrd <= 0)
+        {
+          /* Empty frame received. Restart request */
 
-      if (req->xfrd <= 0) {
-        _err("EMPTY PKT %d\n", req->xfrd);
-        /* Restart request */
-        usb_adb_submit_rdreq(priv, rdcontainer);
-      }
-      else {
-        /* Set request on RX pending queue */
+          usb_adb_submit_rdreq(priv, rdcontainer);
+        }
+      else
+        {
+          /* Queue request and notify readers */
 
-        rdcontainer->offset = 0;
-        sq_addlast(&rdcontainer->node, &priv->rxpending);
-        
-      }
+          flags = enter_critical_section();
 
-      adb_char_notify_readers(priv);
+          /* Put request on RX pending queue */
 
-      leave_critical_section(flags);
+          rdcontainer->offset = 0;
+          sq_addlast(&rdcontainer->node, &priv->rxpending);
+
+          adb_char_notify_readers(priv);
+
+          leave_critical_section(flags);
+        }
+
       break;
 
     case -ESHUTDOWN: /* Disconnection */
@@ -637,7 +622,9 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
     default: /* Some other error occurred */
       usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_RDUNEXPECTED),
                (uint16_t)-req->result);
+
       /* Restart request */
+
       usb_adb_submit_rdreq(priv, rdcontainer);
       break;
     };
@@ -657,12 +644,42 @@ static void usbclass_resetconfig(FAR struct usbdev_adb_s *priv)
 
   if (priv->config != USBADB_CONFIGIDNONE)
     {
+      irqstate_t flags;
+      adb_char_waiter_sem_t *cur_sem;
+
       /* Yes.. but not anymore */
+
+      flags = enter_critical_section();
 
       priv->config = USBADB_CONFIGIDNONE;
 
-      // TODO unlock all char device pollers
-      #warning TODO
+      /* Notify all of the char device waiting readers */
+
+      cur_sem = priv->rdsems;
+      while (cur_sem != NULL)
+        {
+          nxsem_post(&cur_sem->sem);
+          cur_sem = cur_sem->next;
+        }
+
+      priv->rdsems = NULL;
+
+      /* Notify all of the char device waiting writers */
+
+      cur_sem = priv->wrsems;
+      while (cur_sem != NULL)
+        {
+          nxsem_post(&cur_sem->sem);
+          cur_sem = cur_sem->next;
+        }
+
+      priv->wrsems = NULL;
+
+      /* Notify all poll/select waiters that a hangup occurred */
+
+      adb_char_pollnotify(priv, (POLLERR | POLLHUP));
+
+      leave_critical_section(flags);
 
       /* Disable endpoints.  This should force completion of all pending
        * transfers.
@@ -685,9 +702,7 @@ static void usbclass_resetconfig(FAR struct usbdev_adb_s *priv)
 static int usbclass_setconfig(FAR struct usbdev_adb_s *priv, uint8_t config)
 {
   struct usb_epdesc_s epdesc;
-// #ifdef CONFIG_USBDEV_DUALSPEED
   bool hispeed = false;
-// #endif
   int i;
   int ret = 0;
 
@@ -782,14 +797,9 @@ static int usbclass_setconfig(FAR struct usbdev_adb_s *priv, uint8_t config)
         }
     }
 
-  /* We are successfully configured */
+  /* We are successfully configured. Char device is now active */
 
   priv->config = config;
-
-  #warning TODO mark char device as active (write/read ok)
-
-  _err("OK\n");
-
   return OK;
 
 errout:
@@ -797,10 +807,22 @@ errout:
   return ret;
 }
 
+/****************************************************************************
+ * Name: usbclass_ep0incomplete
+ *
+ * Description:
+ *   Handle completion of EP0 control operations
+ *
+ ****************************************************************************/
+
 static void usbclass_ep0incomplete(FAR struct usbdev_ep_s *ep,
                                  FAR struct usbdev_req_s *req)
 {
-  // _err("entry\n");
+  if (req->result || req->xfrd != req->len)
+    {
+      usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_REQRESULT),
+               (uint16_t)-req->result);
+    }
 }
 
 #ifdef CONFIG_USBDEV_DUALSPEED
@@ -828,7 +850,7 @@ static int16_t usbclass_mkcfgdesc(FAR uint8_t *buf,
 #endif
 
   dest = (FAR struct adb_cfgdesc_s *)buf;
-  epdesc = (FAR struct usb_epdesc_s *)(buf+sizeof(g_adb_cfgdesc));
+  epdesc = (FAR struct usb_epdesc_s *)(buf + sizeof(g_adb_cfgdesc));
 
   memcpy(dest, &g_adb_cfgdesc, sizeof(g_adb_cfgdesc));
 
@@ -844,7 +866,7 @@ static int16_t usbclass_mkcfgdesc(FAR uint8_t *buf,
   /* For composite device, apply possible offset to the interface numbers */
 
   dest->ifdesc.ifno = devinfo->ifnobase;
-  dest->ifdesc.iif  = devinfo->strbase+USBADB_INTERFACESTRID;
+  dest->ifdesc.iif  = devinfo->strbase + USBADB_INTERFACESTRID;
 #endif
 
   return sizeof(g_adb_cfgdesc)+2*USB_SIZEOF_EPDESC;
@@ -856,8 +878,6 @@ static int usbclass_mkstrdesc(uint8_t id, FAR struct usb_strdesc_s *strdesc)
   int len;
   int ndata;
   int i;
-
-  _err("entry %d\n", id);
 
   switch (id)
     {
@@ -943,8 +963,6 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
   FAR struct usbdev_adb_s *priv = &((FAR struct adb_driver_s *)driver)->dev;
 
   usbtrace(TRACE_CLASSBIND, 0);
-
-  // _err("CHECK ADDR %p %p\n", dev, driver);
 
   priv->ctrlreq = usbclass_allocreq(dev->ep0, USBADB_MXDESCLEN);
   if (priv->ctrlreq == NULL)
@@ -1057,8 +1075,6 @@ static int usbclass_bind(FAR struct usbdevclass_driver_s *driver,
       leave_critical_section(flags);
     }
 
-  _err("QUEUE INIT %d\n", sq_count(&priv->txfree));
-
   /* Report if we are selfpowered (unless we are part of a
    * composite device)
    */
@@ -1093,6 +1109,8 @@ static void usbclass_unbind(FAR struct usbdevclass_driver_s *driver,
                             FAR struct usbdev_s *dev)
 {
   usbtrace(TRACE_CLASSUNBIND, 0);
+
+  #warning Missing logic
 }
 
 /****************************************************************************
@@ -1144,7 +1162,7 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
   value = GETUINT16(ctrl->value);
   len   = GETUINT16(ctrl->len);
 
-  _err("type=%02x req=%02x value=%04x index=%04x len=%04x\n",
+  uinfo("type=%02x req=%02x value=%04x index=%04x len=%04x\n",
         ctrl->type, ctrl->req, value, index, len);
 
   switch (ctrl->type & USB_REQ_TYPE_MASK)
@@ -1153,20 +1171,20 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
         {
           switch (ctrl->req)
             {
+#ifndef CONFIG_USBADB_COMPOSITE
             case USB_REQ_GETDESCRIPTOR:
-                /* The value field specifies the descriptor type in the MS byte
-                 * and the descriptor index in the LS byte (order is little
-                 * endian)
+                /* The value field specifies the descriptor type in the
+                 * MS byte and the descriptor index in the LS byte
+                 * (order is little endian)
                  */
 
                 switch (ctrl->value[1])
                   {
                   /* If the device is used in as part of a composite
-                   * device, then the device descriptor is provided by logic in
-                   * the composite device implementation.
+                   * device, then the device descriptor is provided by logic
+                   * in the composite device implementation.
                    */
 
-#ifndef CONFIG_USBADB_COMPOSITE
                   case USB_DESC_TYPE_DEVICE:
                     {
                       ret = USB_SIZEOF_DEVDESC;
@@ -1191,8 +1209,8 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
                     break;
 
                   /* If the serial device is used in as part of a composite
-                   * device, then the language string descriptor is provided by
-                   * logic in the composite device implementation.
+                   * device, then the language string descriptor is provided
+                   * by logic in the composite device implementation.
                    */
 
                   case USB_DESC_TYPE_STRING:
@@ -1205,15 +1223,31 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
                                           ctrlreq->buf);
                     }
                     break;
-#endif
 
                   default:
                     {
-                      usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_GETUNKNOWNDESC),
-                               value);
+                      usbtrace(
+                        TRACE_CLSERROR(USBSER_TRACEERR_GETUNKNOWNDESC),
+                        value);
                     }
                     break;
-                  }            
+                  }
+
+            /* If the serial device is used in as part of a composite device,
+             * then the overall composite class configuration is managed by
+             * logic in the composite device implementation.
+             */
+
+            case USB_REQ_GETCONFIGURATION:
+              {
+                if (ctrl->type == USB_DIR_IN)
+                  {
+                    *(FAR uint8_t *)ctrlreq->buf = priv->config;
+                    ret = 1;
+                  }
+              }
+              break;
+#endif /* !CONFIG_USBADB_COMPOSITE */
 
             case USB_REQ_SETCONFIGURATION:
               {
@@ -1224,25 +1258,6 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
               }
               break;
 
-            /* If the serial device is used in as part of a composite device,
-             * then the overall composite class configuration is managed by logic
-             * in the composite device implementation.
-             */
-
-#ifndef CONFIG_USBADB_COMPOSITE
-            case USB_REQ_GETCONFIGURATION:
-              {
-                if (ctrl->type == USB_DIR_IN)
-                  {
-                    *(FAR uint8_t *)ctrlreq->buf = priv->config;
-                    ret = 1;
-                  }
-              }
-              break;
-#endif
-
-            case USB_REQ_SETINTERFACE:
-            case USB_REQ_GETINTERFACE:
             default:
               usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_UNSUPPORTEDSTDREQ),
                        ctrl->req);
@@ -1256,13 +1271,20 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
 
           usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_UNSUPPORTEDCLASSREQ),
                   ctrl->req);
+          break;
         }
 
       default:
         {
-          usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_UNSUPPORTEDTYPE), ctrl->type);
+          usbtrace(
+            TRACE_CLSERROR(USBSER_TRACEERR_UNSUPPORTEDTYPE),
+            ctrl->type);
         }
     }
+
+#ifndef CONFIG_USBADB_COMPOSITE
+
+  #warning composite_ep0submit() seems broken so skip it in case of composite
 
   /* Respond to the setup command if data was returned.  On an error return
    * value (ret < 0), the USB driver will stall.
@@ -1278,13 +1300,7 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
        * device.
        */
 
-#ifndef CONFIG_USBADB_COMPOSITE
-      #error abcd
       ret = EP_SUBMIT(dev->ep0, ctrlreq);
-#else
-      _err("FIXME AVOIDED EP0\n");
-      ret = 0; // composite_ep0submit(driver, dev, ctrlreq);
-#endif
 
       if (ret < 0)
         {
@@ -1293,6 +1309,7 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
           usbclass_ep0incomplete(dev->ep0, ctrlreq);
         }
     }
+#endif /* !CONFIG_USBADB_COMPOSITE */
 
   /* Returning a negative value will cause a STALL */
 
@@ -1312,8 +1329,48 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
 static void usbclass_disconnect(FAR struct usbdevclass_driver_s *driver,
                                 FAR struct usbdev_s *dev)
 {
+  FAR struct usbdev_adb_s *priv;
+  irqstate_t flags;
+
   usbtrace(TRACE_CLASSDISCONNECT, 0);
-  #warning TODO disconnect
+
+#ifdef CONFIG_DEBUG_FEATURES
+  if (!driver || !dev || !dev->ep0)
+    {
+      usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_INVALIDARG), 0);
+      return;
+    }
+#endif
+
+  /* Extract reference to private data */
+
+  priv = &((FAR struct adb_driver_s *)driver)->dev;
+
+#ifdef CONFIG_DEBUG_FEATURES
+  if (!priv)
+    {
+      usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_EP0NOTBOUND), 0);
+      return;
+    }
+#endif
+
+  /* FIXME do we have to lock interrupts here ? */
+
+  flags = enter_critical_section();
+
+  /* Reset the configuration */
+
+  usbclass_resetconfig(priv);
+
+  leave_critical_section(flags);
+
+  /* Perform the soft connect function so that we will we can be
+   * re-enumerated (unless we are part of a composite device)
+   */
+
+#ifndef CONFIG_USBDEV_COMPOSITE
+  DEV_CONNECT(dev);
+#endif
 }
 
 /****************************************************************************
@@ -1393,10 +1450,12 @@ static int usbclass_classobject(int minor,
 
   /* Initialize the char device structure */
 
-  #warning TODO char dev init
   nxsem_init(&alloc->dev.exclsem, 0, 1);
+  alloc->dev.crefs = 0;
 
   /* Register char device driver */
+
+  /* FIXME use minor in device name */
 
   ret = register_driver("/dev/adb0", &g_adb_fops, 0666, &alloc->dev);
   if (ret < 0)
@@ -1426,10 +1485,9 @@ exit_free_driver:
 
 static void usbclass_uninitialize(FAR struct usbdevclass_driver_s *classdev)
 {
-  // TODO unregister char driver
   kmm_free(classdev);
 
-  #warning TODO uninitialize
+  #warning TODO Missing logic (unregister char device driver)
 }
 
 /****************************************************************************
@@ -1447,8 +1505,6 @@ static void usbclass_uninitialize(FAR struct usbdevclass_driver_s *classdev)
 
 static void adb_char_notify_readers(FAR struct usbdev_adb_s *priv)
 {
-  // _err("entry\n");
-
   /* Notify all of the waiting readers */
 
   adb_char_waiter_sem_t *cur_sem = priv->rdsems;
@@ -1523,6 +1579,14 @@ static int adb_char_open(FAR struct file *filep)
   return ret;
 }
 
+/****************************************************************************
+ * Name: adb_char_close
+ *
+ * Description:
+ *   Close adb device.
+ *
+ ****************************************************************************/
+
 static int adb_char_close(FAR struct file *filep)
 {
   int ret;
@@ -1539,10 +1603,17 @@ static int adb_char_close(FAR struct file *filep)
 
   finfo("entry: <%s>\n", inode->i_name);
 
- 
   nxsem_post(&priv->exclsem);
   return OK;
 }
+
+/****************************************************************************
+ * Name: adb_char_blocking_io
+ *
+ * Description:
+ *   Handle read/write blocking io.
+ *
+ ****************************************************************************/
 
 static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
                                 FAR adb_char_waiter_sem_t *sem,
@@ -1557,6 +1628,7 @@ static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
   if (!sq_empty(queue))
     {
       /* Queue not empty after all */
+
       leave_critical_section(flags);
       return 0;
     }
@@ -1610,6 +1682,14 @@ static int adb_char_blocking_io(FAR struct usbdev_adb_s *priv,
   return nxsem_wait(&priv->exclsem);
 }
 
+/****************************************************************************
+ * Name: adb_char_read
+ *
+ * Description:
+ *   Read adb device.
+ *
+ ****************************************************************************/
+
 static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
                                size_t len)
 {
@@ -1618,8 +1698,6 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
   ssize_t ret;
   size_t retlen;
   irqstate_t flags;
-
-  // _err("entry len=%d %d\n", len, sq_count(&priv->rxpending));
 
   assert(len > 0 && buffer != NULL);
 
@@ -1647,7 +1725,8 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
         {
           /* RX queue seems empty. Check again with interrupts disabled */
 
-          ret = adb_char_blocking_io(priv, &sem, &priv->rdsems, &priv->rxpending);
+          ret = adb_char_blocking_io(
+            priv, &sem, &priv->rdsems, &priv->rxpending);
           if (ret < 0)
             {
               nxsem_destroy(&sem.sem);
@@ -1697,20 +1776,22 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
       retlen += reqlen;
       len -= reqlen;
 
-
       /* The entire packet was processed and may be removed from the
        * pending RX list.
        */
 
-      // FIXME atomic queue primitives
+      /* FIXME use atomic queue primitives ? */
+
       flags = enter_critical_section();
       sq_remfirst(&priv->rxpending);
       leave_critical_section(flags);
 
       ret = usb_adb_submit_rdreq(priv, rdcontainer);
-      // TODO handle error
-      if(ret != OK)
+
+      if (ret != OK)
         {
+          /* TODO handle error */
+
           PANIC();
         }
     }
@@ -1718,6 +1799,14 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
   nxsem_post(&priv->exclsem);
   return retlen;
 }
+
+/****************************************************************************
+ * Name: adb_char_write
+ *
+ * Description:
+ *   Write adb device.
+ *
+ ****************************************************************************/
 
 static ssize_t adb_char_write(FAR struct file *filep,
                                 FAR const char *buffer, size_t len)
@@ -1730,8 +1819,6 @@ static ssize_t adb_char_write(FAR struct file *filep,
   FAR struct usbdev_adb_s *priv = inode->i_private;
 
   irqstate_t flags;
-
-  // _err("entry len=%d\n", len);
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -1757,7 +1844,8 @@ static ssize_t adb_char_write(FAR struct file *filep,
         {
           /* TX queue seems empty. Check again with interrupts disabled */
 
-          ret = adb_char_blocking_io(priv, &sem, &priv->wrsems, &priv->txfree);
+          ret = adb_char_blocking_io(
+            priv, &sem, &priv->wrsems, &priv->txfree);
           if (ret < 0)
             {
               nxsem_destroy(&sem.sem);
@@ -1812,7 +1900,8 @@ static ssize_t adb_char_write(FAR struct file *filep,
 
       if (ret != OK)
         {
-          // TODO add tx request back in txfree queue
+          /* TODO add tx request back in txfree queue */
+
           usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_SUBMITFAIL),
                    (uint16_t)-ret);
           PANIC();
@@ -1834,7 +1923,6 @@ errout:
 static int adb_char_ioctl(FAR struct file *filep, int cmd,
                             unsigned long arg)
 {
-  _err("entry\n");
   return -EINVAL;
 }
 
@@ -1847,8 +1935,6 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
   int i;
   pollevent_t eventset;
   irqstate_t flags;
-
-  // _err("entry setup=%d\n", setup);
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -1866,12 +1952,12 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
 
       /* Remove all memory of the poll setup */
 
-      *slot                = NULL;
-      fds->priv            = NULL;
+      *slot     = NULL;
+      fds->priv = NULL;
       goto errout;
     }
 
-  // FIXME only parts of this function required interrupt disabled
+  /* FIXME only parts of this function required interrupt disabled */
 
   flags = enter_critical_section();
 
@@ -1900,18 +1986,16 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
       goto exit_leave_critical;
     }
 
-  /* Notify the POLLOUT event if the pipe is not full, but only if
-   * there is readers.
-   */
-
   eventset = 0;
+
+  /* Notify the POLLOUT event if at least one request is available */
 
   if (!sq_empty(&priv->txfree))
     {
       eventset |= POLLOUT;
     }
 
-  /* Notify the POLLIN event if the pipe is not empty */
+  /* Notify the POLLIN event if at least one read request is pending */
 
   if (!sq_empty(&priv->rxpending))
     {
@@ -1998,11 +2082,11 @@ void usbdev_adb_get_composite_devdesc(struct composite_devdesc_s *dev)
   dev->mkstrdesc           = usbclass_mkstrdesc;
   dev->classobject         = usbclass_classobject;
   dev->uninitialize        = usbclass_uninitialize;
-  dev->nconfigs            = 1;
-  dev->configid            = 1; // 1 CDC
-  dev->cfgdescsize         = sizeof(g_adb_cfgdesc)+2*USB_SIZEOF_EPDESC; // cdcacm_mkcfgdesc(NULL, NULL);
-  dev->devinfo.ninterfaces = 1; // 2 CDC
-  dev->devinfo.nstrings    = 1; // CDCACM_NSTRIDS             (CDCACM_LASTSTRID - CDCACM_STRBASE)
-  dev->devinfo.nendpoints  = USBADB_NUM_EPS; // 3 cdc
+  dev->nconfigs            = USBADB_NCONFIGS;
+  dev->configid            = 1;
+  dev->cfgdescsize         = sizeof(g_adb_cfgdesc)+2*USB_SIZEOF_EPDESC;
+  dev->devinfo.ninterfaces = 1;
+  dev->devinfo.nstrings    = USBADB_NSTRIDS;
+  dev->devinfo.nendpoints  = USBADB_NUM_EPS;
 }
 #endif
