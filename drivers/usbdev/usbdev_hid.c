@@ -303,6 +303,8 @@ static void cdcacm_resetconfig(FAR struct cdcacm_dev_s *priv)
 
       priv->config = USBHID_CONFIGIDNONE;
 
+      wd_cancel(&priv->test_move_timer);
+
       /* Disable endpoints.  This should force completion of all pending
        * transfers.
        */

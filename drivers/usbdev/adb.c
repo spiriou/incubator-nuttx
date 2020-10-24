@@ -48,6 +48,10 @@
  * Pre-processor Definitions
  ****************************************************************************/
 
+/* FIXME use minor for char device npath */
+
+#define USBADB_CHARDEV_PATH "/dev/adb0"
+
 /* USB Controller */
 
 #ifdef CONFIG_USBDEV_SELFPOWERED
@@ -220,6 +224,9 @@ static int adb_char_poll(FAR struct file *filep, FAR struct pollfd *fds,
 static void adb_char_notify_readers(FAR struct usbdev_adb_s *priv);
 static void adb_char_pollnotify(FAR struct usbdev_adb_s *dev,
                                 pollevent_t eventset);
+
+static void adb_char_on_connect(FAR struct usbdev_adb_s *priv, int connect);
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -591,43 +598,50 @@ static void usb_adb_rdcomplete(FAR struct usbdev_ep_s *ep,
 
       usbtrace(TRACE_CLASSRDCOMPLETE, priv->nrdq);
 
+      /* Restart request due to either no reader or
+       * empty frame received.
+       */
+
+      if (priv->crefs == 0)
+        {
+          uwarn("drop frame\n");
+          goto restart_req;
+        }
+
       if (req->xfrd <= 0)
         {
-          /* Empty frame received. Restart request */
-
-          usb_adb_submit_rdreq(priv, rdcontainer);
-        }
-      else
-        {
-          /* Queue request and notify readers */
-
-          flags = enter_critical_section();
-
-          /* Put request on RX pending queue */
-
-          rdcontainer->offset = 0;
-          sq_addlast(&rdcontainer->node, &priv->rxpending);
-
-          adb_char_notify_readers(priv);
-
-          leave_critical_section(flags);
+          goto restart_req;
         }
 
-      break;
+      /* Queue request and notify readers */
+
+      flags = enter_critical_section();
+
+      /* Put request on RX pending queue */
+
+      rdcontainer->offset = 0;
+      sq_addlast(&rdcontainer->node, &priv->rxpending);
+
+      adb_char_notify_readers(priv);
+
+      leave_critical_section(flags);
+      return;
 
     case -ESHUTDOWN: /* Disconnection */
       usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_RDSHUTDOWN), 0);
-      break;
+      return;
 
     default: /* Some other error occurred */
       usbtrace(TRACE_CLSERROR(USBSER_TRACEERR_RDUNEXPECTED),
                (uint16_t)-req->result);
-
-      /* Restart request */
-
-      usb_adb_submit_rdreq(priv, rdcontainer);
-      break;
+      goto restart_req;
     };
+
+restart_req:
+
+  /* Restart request */
+
+  usb_adb_submit_rdreq(priv, rdcontainer);
 }
 
 /****************************************************************************
@@ -644,42 +658,9 @@ static void usbclass_resetconfig(FAR struct usbdev_adb_s *priv)
 
   if (priv->config != USBADB_CONFIGIDNONE)
     {
-      irqstate_t flags;
-      adb_char_waiter_sem_t *cur_sem;
-
       /* Yes.. but not anymore */
 
-      flags = enter_critical_section();
-
-      priv->config = USBADB_CONFIGIDNONE;
-
-      /* Notify all of the char device waiting readers */
-
-      cur_sem = priv->rdsems;
-      while (cur_sem != NULL)
-        {
-          nxsem_post(&cur_sem->sem);
-          cur_sem = cur_sem->next;
-        }
-
-      priv->rdsems = NULL;
-
-      /* Notify all of the char device waiting writers */
-
-      cur_sem = priv->wrsems;
-      while (cur_sem != NULL)
-        {
-          nxsem_post(&cur_sem->sem);
-          cur_sem = cur_sem->next;
-        }
-
-      priv->wrsems = NULL;
-
-      /* Notify all poll/select waiters that a hangup occurred */
-
-      adb_char_pollnotify(priv, (POLLERR | POLLHUP));
-
-      leave_critical_section(flags);
+      adb_char_on_connect(priv, 0);
 
       /* Disable endpoints.  This should force completion of all pending
        * transfers.
@@ -688,6 +669,8 @@ static void usbclass_resetconfig(FAR struct usbdev_adb_s *priv)
       EP_DISABLE(priv->epbulkin);
       EP_DISABLE(priv->epbulkout);
     }
+
+  priv->config = USBADB_CONFIGIDNONE;
 }
 
 /****************************************************************************
@@ -800,6 +783,7 @@ static int usbclass_setconfig(FAR struct usbdev_adb_s *priv, uint8_t config)
   /* We are successfully configured. Char device is now active */
 
   priv->config = config;
+  adb_char_on_connect(priv, 1);
   return OK;
 
 errout:
@@ -1284,6 +1268,10 @@ static int usbclass_setup(FAR struct usbdevclass_driver_s *driver,
 
 #ifndef CONFIG_USBADB_COMPOSITE
 
+  /* Composite should send only one resquest for USB_REQ_SETCONFIGURATION.
+   * Hence ADB driver cannot submit to ep0; composite has to handle it.
+   */
+
   #warning composite_ep0submit() seems broken so skip it in case of composite
 
   /* Respond to the setup command if data was returned.  On an error return
@@ -1384,7 +1372,14 @@ static void usbclass_disconnect(FAR struct usbdevclass_driver_s *driver,
 static void usbclass_suspend(FAR struct usbdevclass_driver_s *driver,
                              FAR struct usbdev_s *dev)
 {
+  FAR struct usbdev_adb_s *priv = &((FAR struct adb_driver_s *)driver)->dev;
+
   usbtrace(TRACE_CLASSSUSPEND, 0);
+
+  if (priv->config != USBADB_CONFIGIDNONE)
+    {
+      adb_char_on_connect(priv, 0);
+    }
 }
 
 /****************************************************************************
@@ -1398,7 +1393,14 @@ static void usbclass_suspend(FAR struct usbdevclass_driver_s *driver,
 static void usbclass_resume(FAR struct usbdevclass_driver_s *driver,
                             FAR struct usbdev_s *dev)
 {
+  FAR struct usbdev_adb_s *priv = &((FAR struct adb_driver_s *)driver)->dev;
+
   usbtrace(TRACE_CLASSRESUME, 0);
+
+  if (priv->config != USBADB_CONFIGIDNONE)
+    {
+      adb_char_on_connect(priv, 1);
+    }
 }
 
 /****************************************************************************
@@ -1457,7 +1459,7 @@ static int usbclass_classobject(int minor,
 
   /* FIXME use minor in device name */
 
-  ret = register_driver("/dev/adb0", &g_adb_fops, 0666, &alloc->dev);
+  ret = register_driver(USBADB_CHARDEV_PATH, &g_adb_fops, 0666, &alloc->dev);
   if (ret < 0)
     {
       uerr("Failed to register char device");
@@ -1485,9 +1487,14 @@ exit_free_driver:
 
 static void usbclass_uninitialize(FAR struct usbdevclass_driver_s *classdev)
 {
-  kmm_free(classdev);
+  FAR struct adb_driver_s *alloc = container_of(
+    classdev, FAR struct adb_driver_s, drvr);
 
-  #warning TODO Missing logic (unregister char device driver)
+  #warning FIXME Maybe missing logic here
+
+  unregister_driver(USBADB_CHARDEV_PATH);
+
+  kmm_free(alloc);
 }
 
 /****************************************************************************
@@ -1541,7 +1548,7 @@ static void adb_char_pollnotify(FAR struct usbdev_adb_s *dev,
       fds = dev->fds[i];
       if (fds)
         {
-          fds->revents |= eventset & fds->events;
+          fds->revents |= eventset & (fds->events | POLLERR | POLLHUP);
 
           if (fds->revents != 0)
             {
@@ -1573,7 +1580,11 @@ static int adb_char_open(FAR struct file *filep)
       return ret;
     }
 
-  finfo("entry: <%s>\n", inode->i_name);
+  finfo("entry: <%s> %d\n", inode->i_name, priv->crefs);
+
+  priv->crefs += 1;
+
+  assert(priv->crefs != 0);
 
   nxsem_post(&priv->exclsem);
   return ret;
@@ -1601,7 +1612,11 @@ static int adb_char_close(FAR struct file *filep)
       return ret;
     }
 
-  finfo("entry: <%s>\n", inode->i_name);
+  finfo("entry: <%s> %d\n", inode->i_name, priv->crefs);
+
+  priv->crefs -= 1;
+
+  assert(priv->crefs >= 0);
 
   nxsem_post(&priv->exclsem);
   return OK;
@@ -1700,6 +1715,13 @@ static ssize_t adb_char_read(FAR struct file *filep, FAR char *buffer,
   irqstate_t flags;
 
   assert(len > 0 && buffer != NULL);
+
+  if (priv->config == USBADB_CONFIGIDNONE)
+    {
+      /* USB device not connected */
+
+      return -EPIPE;
+    }
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -1819,6 +1841,13 @@ static ssize_t adb_char_write(FAR struct file *filep,
   FAR struct usbdev_adb_s *priv = inode->i_private;
 
   irqstate_t flags;
+
+  if (priv->config == USBADB_CONFIGIDNONE)
+    {
+      /* USB device not connected */
+
+      return -EPIPE;
+    }
 
   ret = nxsem_wait(&priv->exclsem);
   if (ret < 0)
@@ -2012,6 +2041,51 @@ exit_leave_critical:
 errout:
   nxsem_post(&priv->exclsem);
   return ret;
+}
+
+static void adb_char_on_connect(FAR struct usbdev_adb_s *priv, int connect)
+{
+  irqstate_t flags;
+  adb_char_waiter_sem_t *cur_sem;
+
+  flags = enter_critical_section();
+
+  if (connect)
+    {
+      /* Notify poll/select with POLLIN */
+
+      adb_char_pollnotify(priv, POLLIN);
+    }
+  else
+    {
+      /* Notify all of the char device waiting readers */
+
+      cur_sem = priv->rdsems;
+      while (cur_sem != NULL)
+        {
+          nxsem_post(&cur_sem->sem);
+          cur_sem = cur_sem->next;
+        }
+
+      priv->rdsems = NULL;
+
+      /* Notify all of the char device waiting writers */
+
+      cur_sem = priv->wrsems;
+      while (cur_sem != NULL)
+        {
+          nxsem_post(&cur_sem->sem);
+          cur_sem = cur_sem->next;
+        }
+
+      priv->wrsems = NULL;
+
+      /* Notify all poll/select waiters that a hangup occurred */
+
+      adb_char_pollnotify(priv, (POLLERR | POLLHUP));
+    }
+
+    leave_critical_section(flags);
 }
 
 /****************************************************************************

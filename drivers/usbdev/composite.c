@@ -590,8 +590,6 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
 
                   uint8_t strid = ctrl->value[0];
 
-                  _err("REQ STR %d %d\n", strid, COMPOSITE_NSTRIDS);
-
                   FAR struct usb_strdesc_s *buf =
                              (FAR struct usb_strdesc_s *)ctrlreq->buf;
 
@@ -625,24 +623,16 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
 
                       for (i = 0; i < priv->ndevices; i++)
                         {
-                          _err("check %d %d -> %d\n",
-                            strid,
-                            priv->device[i].compdesc.devinfo.strbase,
-                            priv->device[i].compdesc.devinfo.nstrings);
-
                           if (strid >  priv->device[i].compdesc.devinfo.strbase &&
                               strid <= priv->device[i].compdesc.devinfo.strbase +
                                        priv->device[i].compdesc.devinfo.nstrings)
                             {
-                              _err("FOUND\n");
                               ret = priv->device[i].compdesc.mkstrdesc(strid -
                                     priv->device[i].compdesc.devinfo.strbase, buf);
                               break;
                             }
                         }
                     }
-
-                  _err("ret str %d\n", ret);
                 }
                 break;
 
@@ -758,7 +748,6 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
 
       ret = EP_SUBMIT(dev->ep0, ctrlreq);
 
-      _err("submit %d %d\n", ret, ctrlreq->len);
       if (ret < 0)
         {
           usbtrace(TRACE_CLSERROR(USBCOMPOSITE_TRACEERR_EPRESPQ), (uint16_t)-ret);
@@ -767,7 +756,6 @@ static int composite_setup(FAR struct usbdevclass_driver_s *driver,
         }
     }
 
-  _err("EXIT %d\n", ret);
   return ret;
 }
 
